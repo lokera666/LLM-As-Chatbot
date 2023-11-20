@@ -2,15 +2,81 @@ import torch
 from transformers import AutoModelForSeq2SeqLM, T5Tokenizer
 from optimum.bettertransformer import BetterTransformer
 
-def load_model(base, finetuned, multi_gpu, force_download_ckpt):
-    tokenizer = T5Tokenizer.from_pretrained(base, use_fast=False)
-    tokenizer.padding_side = "left"
+from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
 
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        base, 
-        torch_dtype=torch.float16,
-        load_in_8bit=False if multi_gpu else True, 
-        device_map="auto")
+def load_model(
+    base, 
+    finetuned, 
+    gptq,
+    gptq_base,
+    mode_cpu,
+    mode_mps,
+    mode_full_gpu,
+    mode_8bit,
+    mode_4bit,
+    mode_gptq,
+    mode_mps_gptq,
+    mode_cpu_gptq,
+    force_download_ckpt,
+    local_files_only
+):
+    tokenizer = T5Tokenizer.from_pretrained(
+        base, use_fast=False, local_files_only=local_files_only
+    )
+    tokenizer.padding_side = "left"
+    
+    if mode_cpu:
+        print("cpu mode")
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            base, 
+            device_map={"": "cpu"}, 
+            use_safetensors=False,
+            local_files_only=local_files_only
+        )
+            
+    elif mode_mps:
+        print("mps mode")
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            base,
+            device_map={"": "mps"},
+            torch_dtype=torch.float16,
+            use_safetensors=False,
+            local_files_only=local_files_only
+        )
+
+    elif mode_gptq:
+        print("gpu(gptq) mode")
+        tokenizer = AutoTokenizer.from_pretrained(
+            gptq, local_files_only=local_files_only
+        )
+        tokenizer.pad_token_id = 0
+        tokenizer.padding_side = "left"        
+        
+        model = AutoGPTQForCausalLM.from_quantized(
+            gptq,
+            model_basename=gptq_base,
+            use_safetensors=True,
+            trust_remote_code=False,
+            device_map="auto",
+            quantize_config=None,
+            local_files_only=local_files_only
+        )
+
+    else:
+        print("gpu mode")
+        print(f"8bit = {mode_8bit}, 4bit = {mode_4bit}")
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            base,
+            load_in_8bit=mode_8bit,
+            load_in_4bit=mode_4bit,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            use_safetensors=False,
+            local_files_only=local_files_only
+        )
+
+        if not mode_8bit and not mode_4bit:
+            model.half()
 
     model = BetterTransformer.transform(model)
     return model, tokenizer

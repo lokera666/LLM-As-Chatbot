@@ -1,124 +1,51 @@
 import copy
+import json
 import global_vars
 from chats import pre, post
 from pingpong import PingPong
 from gens.batch_gen import get_output_batch
 
-from pingpong.context import CtxLastWindowStrategy
+from chats.utils import build_prompts, text_stream, internet_search
 
-def build_prompt(ppmanager, user_message, win_size=2):
-    dummy_ppm = copy.deepcopy(ppmanager)
-    dummy_ppm.pop_pingpong()
-    lws = CtxLastWindowStrategy(win_size)
-    
-    lws_result = lws(dummy_ppm, truncate_size=100)
-    lws_result = lws_result.replace("### Instruction:\n", "I said to you as: ")
-    lws_result = lws_result.replace("### Response:\n", "You responded back to me as: ")
-    if lws_result != "":
-        lws_result = f'''Given the recent conversation between you and me of "
------
-{lws_result}
------"
-the global context of this conversations is as follow in your perspective of "'''
-    
-    if dummy_ppm.ctx:
-        dummy_ppm.ctx = lws_result + dummy_ppm.ctx + '"'
-    else:
-        dummy_ppm.ctx = lws_result + dummy_ppm.ctx
-        
-    prompts = dummy_ppm.add_ping(user_message)    
-    return prompts
+def chat_stream(
+    idx, local_data, user_message, state,
+    global_context, ctx_num_lconv, ctx_sum_prompt,
+    res_temp, res_topp, res_topk, res_rpen, res_mnts, res_beams, res_cache, res_sample, res_eosid, res_padid,
+    sum_temp, sum_topp, sum_topk, sum_rpen, sum_mnts, sum_beams, sum_cache, sum_sample, sum_eosid, sum_padid,
+    internet_option, serper_api_key
+):
+    res = [
+      state["ppmanager_type"].from_json(json.dumps(ppm))
+      for ppm in local_data
+    ]
 
-def summarize(ppmanager):
-    ctx = ppmanager.ctx
-    pong = ppmanager.pingpongs[-1].pong
-    if ctx is None or ctx == "":
-        ping = f'given the context of "{ctx}", summarize your response of "{pong}"'
-    else:
-        ping = f'summarize "{pong}"'
-    prompt = ppmanager.add_ping(ping)
-    
-    summarize_output = get_output_batch(
-        global_vars.model, global_vars.tokenizer, [prompt], global_vars.gen_config_summarization
-    )[0].split("### Response:")[-1].strip()
-    ppmanager.ctx = summarize_output
-    ppmanager.pop_pingpong()
-    return ppmanager
-
-def wipe_weird_pong_ends(ppmanager):
-    last_pong = ppmanager.pingpongs[-1].pong
-    last_pong_len = len(last_pong)
-    
-    tmp_idx = last_pong_len-1
-    for char in reversed(last_pong):
-        if char in ["!", ".", "?"] \
-            and tmp_idx != last_pong_len-1: 
-            last_pong = last_pong[:tmp_idx+1]
-            break
-            
-        tmp_idx -= 1
-
-    ppmanager.pingpongs[-1].pong = last_pong
-    return ppmanager
-    
-def text_stream(ppmanager, streamer):
-    sandbox = ""
-    sandbox_enabled = False
-    for new_text in streamer:
-        new_text = new_text.replace("�", "")
-        
-        if "###" in new_text:
-            sandbox_enabled = True
-            sandbox = new_text
-        elif "Instruction:" in new_text \
-            or "Response:" in new_text \
-            or "Comment:" in new_text \
-            or "Commentary:" in new_text:
-            break
-        else:
-            if sandbox_enabled:
-                sandbox += new_text
-                sandbox_enabled = False
-
-            if "### Instruction:" in sandbox or \
-                "### Response:" in sandbox or \
-                "### Input:" in sandbox:
-                break
-            else:
-                ppmanager.append_pong(new_text)
-                yield ppmanager, ppmanager.build_uis()
-                
-    yield ppmanager, ppmanager.build_uis()
-    
-def chat_stream(user_message, state):
-    ppm = state["ppmanager"]
+    ppm = res[idx]
 
     # add_ping returns a prompt structured in Alpaca form
-    # add_pong("") means no response yet (to avoid None). Later, tokens will be appended
     ppm.add_pingpong(
         PingPong(user_message, "")
     )
-    prompt = build_prompt(ppm, user_message)
+    prompt = build_prompts(ppm, global_context, ctx_num_lconv)
+
+    #######
+    if internet_option:
+        search_prompt = None
+        for tmp_prompt, uis in internet_search(ppm, serper_api_key, global_context, ctx_num_lconv):
+            search_prompt = tmp_prompt
+            yield "", uis, prompt, str(res)
     
     # prepare text generating streamer & start generating
-    gen_kwargs, streamer = pre.build(prompt, global_vars.gen_config_raw)
+    gen_kwargs, streamer = pre.build(
+        search_prompt if internet_option else prompt,
+        res_temp, res_topp, res_topk, res_rpen, res_mnts, 
+        res_beams, res_cache, res_sample, res_eosid, res_padid,
+        return_token_type_ids=False
+    )
     pre.start_gen(gen_kwargs)
 
     # handling stream
-    for _, uis in text_stream(ppm, streamer):
-        yield "", uis, prompt, state
+    for ppmanager, uis in text_stream(ppm, streamer):
+        yield "", uis, prompt, str(res)
 
     ppm = post.strip_pong(ppm)
-    ppm = wipe_weird_pong_ends(ppm)
-    yield "", ppm.build_uis(), prompt, state
-    
-    # summarization
-    ppm.add_pingpong(
-        PingPong(None, "![](https://i.postimg.cc/ZKNKDPBd/Vanilla-1s-209px.gif)")
-    )
-    yield "", ppm.build_uis(), prompt, state
-    ppm.pop_pingpong()
-    
-    ppm = summarize(ppm)
-    state["ppmanager"] = ppm
-    yield "", ppm.build_uis(), prompt, state
+    yield "", ppm.build_uis(), prompt, str(res)
